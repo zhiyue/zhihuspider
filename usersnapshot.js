@@ -168,6 +168,16 @@ function getSingleUserInfo(threadnum, callback, cursor, retry) {
         r.name = header.find(".title-section .name").text();
         r.signature = header.find(".title-section .bio").text();
         r.description = header.find(".description .content").text().trim().substr(0, 1500);
+
+        //地理、职业、学校等信息
+        var itemsdiv = header.find(".items");
+        r.location = itemsdiv.find(".location").text();//位置
+        r.business = itemsdiv.find(".business").text();//行业
+        r.employment = itemsdiv.find(".employment").text();//公司
+        r.position = itemsdiv.find(".position").text();//职位
+        r.education = itemsdiv.find(".education").text();//学校
+        r.educationextra = itemsdiv.find(".education-extra").text();//专业
+
         r.sex = 0;//性别
         if (header.find(".icon-profile-male").length == 1)
             r.sex = 1;
@@ -187,7 +197,7 @@ function getSingleUserInfo(threadnum, callback, cursor, retry) {
 
         //判断账号停用
         var accountstatus = $(".zh-profile-account-status");
-        if (accountstatus.length == 1 && accountstatus.text().indexOf("停用") >= 0) {
+        if (accountstatus.length == 1 && accountstatus.text().indexOf("知乎社区规范") >= 0) {
             logger.debug(user.tid + " User " + user.id + "'s account is stopped.");
             r.stopped = 1;
         }
@@ -213,7 +223,7 @@ function getSingleUserInfo(threadnum, callback, cursor, retry) {
         r.avatar = header.find("img.avatar").attr("src");
 
         //2015.8.31 头像URL修改格式
-        if (r.avatar && r.avatar.indexOf("//") == 0) r.avatar = "http://" + r.avatar.substr(2);
+        if (r.avatar && r.avatar.indexOf("//") == 0) r.avatar = "https://" + r.avatar.substr(2);
 
         if (r.avatar && tools.getUrlFileName(r.avatar) != tools.getUrlFileName(user.avatar)) //判断是否更换过头像（只比较文件名部分）
             r.oldavatar = user.avatar;
@@ -301,9 +311,13 @@ function getTopAnswers(r, page, alist, callback, retry) {
         if (err) {
             //如果失败则重试，超出重试次数则返回
             retry++;
-            logger.error("Get user " + r.id + "'s top answer page " + page + " error:" + err);
+            if (err == '429')//429错误只记录调试信息
+                logger.debug("Get user " + r.id + "'s top answer page " + page + " error:" + err);
+            else
+                logger.error("Get user " + r.id + "'s top answer page " + page + " error:" + err);
+
             if (retry >= maxretry)
-                callback("reached max retry count", alist);
+                callback("error reached max retry count : " + err, alist);
             else
                 setTimeout(function () {
                     getTopAnswers(r, page, alist, callback, retry);
@@ -318,13 +332,13 @@ function getTopAnswers(r, page, alist, callback, retry) {
         answerlist.each(function () {
             var a = Object();
             var aitem = $(this);//单个答案的html
-            a.agree = Number(aitem.find(".zm-item-vote-count").attr("data-votecount"));
+            a.agree = Number(aitem.find(".zm-item-vote-info").attr("data-votecount"));
             if (!isNaN(a.agree)) {
                 a.timestamp = Number(aitem.find(".zm-item-answer").attr("data-created"));
                 a.aid = aitem.find(".zm-item-answer").attr("data-aid");//用于获取赞同列表的回答id
                 a.date = tools.getDateTimeString(new Date(a.timestamp * 1000));//发布时间
                 a.link = aitem.find(".question_link").attr("href");
-                a.name = aitem.find(".question_link").html();
+                a.name = aitem.find(".question_link").text().replace(/\n/g, "");
                 a.ispost = false;
                 a.collapsed = (aitem.find(".zm-item-answer").attr("data-collapsed") == "1");//是否折叠
                 a.noshare = (aitem.find(".copyright").text().indexOf("禁止转载") >= 0);//是否禁止转载
@@ -359,7 +373,7 @@ function getTopAnswers(r, page, alist, callback, retry) {
             retry++;
             logger.error("Get user " + r.id + "'s top answer page " + page + " error on answer title.");
             if (retry >= maxretry)
-                callback("reached max retry count", alist);
+                callback("reached max retry count : answer title", alist);
             else
                 setTimeout(function () {
                     getTopAnswers(r, page, alist, callback, retry);
@@ -377,25 +391,129 @@ function getTopAnswers(r, page, alist, callback, retry) {
             return;
         }
 
-        //否则读取专栏并合并结果
-        setTimeout(function () {
-            getPosts(r, function (postdata) {
-                if (postdata && postdata.length > 0)
-                    alist = alist.concat(postdata);
+        //答案读取完成，读取文章并将两者合并返回
+        if (r.post > 0) {
+            setTimeout(function () {
+                getTopPosts(r, 1, new Array(), function (err, plist) {
+                    if (err)
+                        logger.error("Get user " + r.id + "'s post error: " + err);
 
-                callback(null, alist);
-            })
-        }, httpdelay);
+                    if (plist && plist.length > 0)
+                        alist = alist.concat(plist);
+
+                    callback(null, alist);
+                })
+            }, httpdelay);
+        }
+        else//如果没有文章则直接返回
+        {
+            callback(null, alist);
+        }
     })
 }
 
-//读取用户专栏文章列表
+//获取用户高票文章列表
+function getTopPosts(r, page, plist, callback, retry) {
+    if (!retry) retry = 0;//重试次数
+    //获取用户高票文章
+    logger.debug("Getting user " + r.id + "'s top post page " + page + ".");
+    tools.get(config.urlpre + "people/" + encodeURIComponent(r.id) + "/posts?order_by=vote_num&page=" + page, cookie, function (err, data) {
+        if (err) {
+            //如果失败则重试，超出重试次数则返回
+            retry++;
+            if (err == '429')//429错误只记录调试信息
+                logger.debug("Get user " + r.id + "'s top post page " + page + " error:" + err);
+            else
+                logger.error("Get user " + r.id + "'s top post page " + page + " error:" + err);
+
+            if (retry >= maxretry)
+                callback("error reached max retry count : " + err, plist);
+            else
+                setTimeout(function () {
+                    getTopPosts(r, page, plist, callback, retry);
+                }, faildelay);
+            return;
+        }
+        //解析文章列表
+        var $ = cheerio.load(data, {decodeEntities: false});
+        var postlist = $("#zh-profile-post-list .zm-item");
+        var pageplist = new Array();//当前页文章
+        var getpostfailed = false;//执行each的过程中是否出错，出错则整页重读
+        postlist.each(function () {
+            var p = Object();
+            var pitem = $(this);//单个文章的html
+            p.agree = Number(pitem.find(".zm-item-vote-info").attr("data-votecount"));
+            if (!isNaN(p.agree)) {
+                p.timestamp = Number(pitem.attr("data-time"));
+                p.aid = pitem.find("meta[itemprop='post-url-token']").attr("content");//文章id，就是url后面的id
+                p.date = tools.getDateTimeString(new Date(p.timestamp * 1000));//发布时间
+                p.link = pitem.find(".post-link").attr("href");
+                p.name = pitem.find(".post-link").text().replace(/\n/g, "");
+                p.ispost = true;
+                p.collapsed = false;//是否折叠
+                p.noshare = false;//是否禁止转载
+
+                //如果链接或标题为空，说明读取有错，需要重读本页
+                if (!p.link || !p.name) {
+                    getpostfailed = true;
+                    return;
+                }
+
+                p.link = p.link.replace(config.urlzhuanlanpre, "/");//去掉专栏链接前缀
+
+                //获取文章摘要
+                var summarydiv = pitem.find(".summary");
+                summarydiv.find("a.toggle-expand").remove();//移除展开文章的链接
+                p.summary = summarydiv.text().trim().replace(/\n/g, "").substr(0, 1000)
+
+                //计算文章字数和图片数
+                var contentdiv = pitem.find("textarea");
+                var content = contentdiv.text().trim().replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+                p.content = content;
+                var findimg = content.match(/<img/g);//查找包含的img标签数
+                p.imgcount = findimg ? findimg.length : 0;
+                var text = content.replace(/<[^>]*>/g, '');//去掉所有html标签的文本内容
+                p.len = text.length;
+                pageplist.push(p);
+            }
+        })
+
+        //如果前一步中出现任何错误则重读当前页，超出重试次数则返回
+        if (getpostfailed) {
+            retry++;
+            logger.error("Get user " + r.id + "'s top post page " + page + " error on post title.");
+            if (retry >= maxretry)
+                callback("reached max retry count : post title", plist);
+            else
+                setTimeout(function () {
+                    getTopPosts(r, page, plist, callback, retry);
+                }, faildelay);
+            return;
+        }
+
+        plist = plist.concat(pageplist);
+
+        //如果本页最后一篇文章仍然高于指定票数，且未读完所有文章，则继续读取下一页
+        if (postlist.length > 0 && plist.length > 0 && plist.length < r.post && plist[plist.length - 1].agree >= agreelimit) {
+            setTimeout(function () {
+                getTopPosts(r, page + 1, plist, callback);
+            }, httpdelay);
+            return;
+        }
+
+        //否则返回文章结果
+        callback(null, plist);
+    })
+}
+
+
+//读取用户专栏文章列表（已过时）
 function getPosts(r, callback) {
     if (r.post == 0) callback(null);
     else {
         logger.debug("Getting user " + r.id + "'s posts.");
         //抓取用户专栏文章页
-        var url = "http://www.zhihu.com/people/" + encodeURIComponent(r.id) + "/posts";
+        var url = config.urlpre + "people/" + encodeURIComponent(r.id) + "/posts";
         tools.get(url, cookie, function (err, data) {
             if (err) {//失败则重读
                 setTimeout(function () {
@@ -430,7 +548,7 @@ function getPosts(r, callback) {
     }
 }
 
-//读取单个专栏，获取文章赞同数
+//读取单个专栏，获取文章赞同数（已过时）
 function getSingleColumn(userid, links, cursor, postdata, callback, retry) {
     if (retry == undefined) retry = 0;
     if (cursor >= links.length) {
@@ -558,7 +676,13 @@ function saveResults(callback) {
         }
 
         //为节约判断资源，用户签名/描述/是否屏蔽等字段一律更新
-        sqls.push("update users set signature=" + db.escape(r.signature) + ", description= " + db.escape(r.description) + ", stopped=" + r.stopped + " where tid=" + r.uid);
+        sqls.push("update users set signature=" + db.escape(r.signature) + ", description= " + db.escape(r.description) + ", stopped=" + r.stopped +
+            " where tid=" + r.uid);
+
+        //单独一句更新用户附加信息
+        sqls.push("update users set location=" + db.escape(r.location) + ", business= " + db.escape(r.business) + ", employment= " + db.escape(r.employment) +
+            ", position= " + db.escape(r.position) + ", education= " + db.escape(r.education) + ", educationextra= " + db.escape(r.educationextra) +
+            " where tid=" + r.uid);
 
         //为了避免快照插入后未插入答案即中断，快照本体要放到最后面插入
         sqls.push(snapshotsql);
@@ -613,7 +737,7 @@ function saveResults(callback) {
             logger.log("success read " + successUserCount + " users first time, " + failUserCount + " failed, " + fixedUserCount + " of them fixed.");
             logger.log(idchangedUserCount + " users changed id, " + namechangedUserCount + " users changed name, " + avatarchangedUserCount + " users uploaded new avatar.");
             endtime = tools.getDateTimeString();
-            var snapsql = "UPDATE snapshots SET endtime='" + endtime + "', successcount='" + (successUserCount + fixedUserCount) + "'," +
+            var snapsql = "UPDATE snapshots SET endtime='" + endtime + "', successcount=(select count(*) from usersnapshots where sid='" + sid + "')," +
                 " failcount='" + (failUserCount - fixedUserCount) + "', idchangedcount='" + idchangedUserCount + "'," +
                 " namechangedcount='" + namechangedUserCount + "', avatarchangedcount='" + avatarchangedUserCount + "'" +
                 " WHERE tid='" + sid + "'";
@@ -636,12 +760,12 @@ function fixUseridByHash(userlist, cursor, callback) {
                 logger.error(user.tid + " read user page by hash error:" + err);
             else {
                 var $ = cheerio.load(data, {decodeEntities: false});
-                var detailhref = $(".zm-profile-header a.zm-profile-header-user-detail").attr("href");//通过链接读取用户id
-                if (!detailhref) {
+                var homepagehref = $(".zm-profile-header .profile-navbar a.home").attr("href");//通过链接读取用户id
+                if (!homepagehref) {
                     logger.error(user.tid + " cannot get user id by hash: " + err);//可能会失败，失败则忽略
                 }
                 else {
-                    var id = detailhref.replace("/people/", "").replace("/about", "");
+                    var id = homepagehref.replace("/people/", "").replace("/org/", "");
                     if (user.id != id) {//修改id
                         user.oldid = user.id;
                         user.id = id;
